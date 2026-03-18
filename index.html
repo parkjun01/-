@@ -44,6 +44,20 @@
                     </div>
                 </div>
 
+                <!-- ⏱️ 최소 교집합 시간 설정 추가 -->
+                <div class="mb-4 flex items-center justify-between bg-gray-50 p-3 rounded-xl border border-gray-200">
+                    <label for="minOverlap" class="text-sm font-bold text-gray-700 flex items-center gap-2">
+                        ⏱️ 최소 교집합 시간
+                        <span class="text-xs font-normal text-gray-500 hidden sm:inline">이 시간 이상 겹쳐야 한 조가 됩니다.</span>
+                    </label>
+                    <select id="minOverlap" class="p-2 text-sm border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-orange-400 bg-white">
+                        <option value="10">10분 이상</option>
+                        <option value="20">20분 이상</option>
+                        <option value="30" selected>30분 이상</option>
+                        <option value="60">1시간 이상</option>
+                    </select>
+                </div>
+
                 <label class="block text-sm font-bold text-gray-700 mb-1">🕒 공강 시간 입력 (이름 시간)</label>
                 <textarea
                     id="inputText"
@@ -214,8 +228,8 @@
             return result;
         };
 
-        // 그룹이 조건에 맞는지 검증하는 함수
-        const isValidGroup = (group) => {
+        // 그룹이 조건에 맞는지 검증하는 함수 (minOverlap 파라미터 추가)
+        const isValidGroup = (group, minOverlap) => {
             const males = group.filter(p => p.gender === '남').length;
             const females = group.filter(p => p.gender === '여').length;
 
@@ -230,7 +244,7 @@
                 return { valid: false };
             }
 
-            // 모든 멤버가 공통으로 겹치는 시간(10분 이상) 찾기
+            // 모든 멤버가 공통으로 겹치는 시간 찾기
             let commonTimes = group[0].times;
             for (let i = 1; i < group.length; i++) {
                 let nextCommon = [];
@@ -238,7 +252,7 @@
                     for (let b of group[i].times) {
                         let start = Math.max(a.start, b.start);
                         let end = Math.min(a.end, b.end);
-                        if (end - start >= 10) {
+                        if (end - start >= minOverlap) {
                             nextCommon.push({start, end});
                         }
                     }
@@ -294,6 +308,7 @@
             const peopleMap = new Map();
             const lines = inputText.split('\n');
             const missingGenders = new Set();
+            const minOverlap = parseInt(document.getElementById('minOverlap').value, 10);
             
             for (const line of lines) {
                 if (!line.trim()) continue;
@@ -347,53 +362,100 @@
                 return;
             }
 
-            // 전체 공강 시간이 적은 사람부터 우선 배치
-            const getTotalTime = (p) => p.times.reduce((sum, t) => sum + (t.end - t.start), 0);
-            let currentUnassigned = [...parsedPeople].sort((a, b) => getTotalTime(a) - getTotalTime(b));
-            const formedGroups = [];
+            // --- [업그레이드된 매칭 알고리즘: 수백 번의 시뮬레이션으로 남는 인원 최소화] ---
+            let bestResult = { formedGroups: [], unassigned: [...parsedPeople], unassignedCount: parsedPeople.length, totalOverlap: 0 };
+            const NUM_ITERATIONS = 500; // 500번의 경우의 수 탐색
 
-            let progress = true;
-            while (progress) {
-                progress = false;
-
-                // 1. 3명 그룹 우선 시도 (최대한 많은 인원을 묶기 위해)
-                const combs3 = getCombinations(currentUnassigned, 3);
-                const valid3 = combs3.map(c => ({ combo: c, ...isValidGroup(c) })).filter(r => r.valid);
+            for (let iter = 0; iter < NUM_ITERATIONS; iter++) {
+                let currentUnassigned = [...parsedPeople];
                 
-                if (valid3.length > 0) {
-                    valid3.sort((a, b) => (b.overlapEnd - b.overlapStart) - (a.overlapEnd - a.overlapStart));
-                    const best = valid3[0];
-                    
-                    formedGroups.push({
-                        people: best.combo,
-                        start: best.overlapStart,
-                        end: best.overlapEnd
-                    });
-                    
-                    currentUnassigned = currentUnassigned.filter(p => !best.combo.some(member => member.id === p.id));
-                    progress = true;
-                    continue;
+                if (iter === 0) {
+                    // Iteration 0: 공강 시간이 적은 사람 우선 (기본 탐색)
+                    const getTotalTime = (p) => p.times.reduce((sum, t) => sum + (t.end - t.start), 0);
+                    currentUnassigned.sort((a, b) => getTotalTime(a) - getTotalTime(b));
+                } else {
+                    // 나머지 Iteration: 무작위 섞기 (다양한 매칭 경우의 수 탐색)
+                    for (let i = currentUnassigned.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        [currentUnassigned[i], currentUnassigned[j]] = [currentUnassigned[j], currentUnassigned[i]];
+                    }
                 }
 
-                // 2. 3명이 안되면 2명 그룹 시도
-                const combs2 = getCombinations(currentUnassigned, 2);
-                const valid2 = combs2.map(c => ({ combo: c, ...isValidGroup(c) })).filter(r => r.valid);
+                // 0: 3명 우선, 1: 2명 우선, 2: 무작위 혼합
+                const strategy = Math.floor(Math.random() * 3);
+
+                let formedGroups = [];
+                let skipped = [];
+
+                while (currentUnassigned.length > 0) {
+                    let p1 = currentUnassigned.shift();
+                    let validGroups = [];
+                    
+                    // 2인조 탐색
+                    for (let i = 0; i < currentUnassigned.length; i++) {
+                        let g = [p1, currentUnassigned[i]];
+                        let res = isValidGroup(g, minOverlap);
+                        if (res.valid) validGroups.push({ combo: g, size: 2, ...res });
+                    }
+                    
+                    // 3인조 탐색
+                    for (let i = 0; i < currentUnassigned.length; i++) {
+                        for (let j = i + 1; j < currentUnassigned.length; j++) {
+                            let g = [p1, currentUnassigned[i], currentUnassigned[j]];
+                            let res = isValidGroup(g, minOverlap);
+                            if (res.valid) validGroups.push({ combo: g, size: 3, ...res });
+                        }
+                    }
+                    
+                    if (validGroups.length > 0) {
+                        // 전략에 따른 점수 부여
+                        validGroups.forEach(g => {
+                            let overlapLen = g.overlapEnd - g.overlapStart;
+                            if (strategy === 0) {
+                                g.score = (g.size * 1000) + overlapLen; // 3인조 강력 우대
+                            } else if (strategy === 1) {
+                                g.score = (g.size === 2 ? 1000 : 0) + overlapLen; // 2인조 강력 우대
+                            } else {
+                                g.score = (Math.random() * 1000) + overlapLen; // 유연하게 섞기
+                            }
+                        });
+                        
+                        // 가장 점수가 높은 그룹 선택
+                        validGroups.sort((a, b) => b.score - a.score);
+                        let best = validGroups[0];
+                        
+                        formedGroups.push({
+                            people: best.combo,
+                            start: best.overlapStart,
+                            end: best.overlapEnd
+                        });
+                        
+                        // 매칭된 인원 목록에서 제거
+                        let assignedIds = best.combo.map(m => m.id);
+                        currentUnassigned = currentUnassigned.filter(u => !assignedIds.includes(u.id));
+                    } else {
+                        // 짝을 찾지 못함
+                        skipped.push(p1);
+                    }
+                }
                 
-                if (valid2.length > 0) {
-                    valid2.sort((a, b) => (b.overlapEnd - b.overlapStart) - (a.overlapEnd - a.overlapStart));
-                    const best = valid2[0];
-                    
-                    formedGroups.push({
-                        people: best.combo,
-                        start: best.overlapStart,
-                        end: best.overlapEnd
-                    });
-                    
-                    currentUnassigned = currentUnassigned.filter(p => !best.combo.some(member => member.id === p.id));
-                    progress = true;
-                    continue;
+                let unassignedCount = skipped.length;
+                let totalOverlap = formedGroups.reduce((sum, g) => sum + (g.end - g.start), 0);
+                
+                // 최고 결과 갱신 (1순위: 남는 인원 최소화, 2순위: 겹치는 시간 최대화)
+                if (unassignedCount < bestResult.unassignedCount || 
+                   (unassignedCount === bestResult.unassignedCount && totalOverlap > bestResult.totalOverlap)) {
+                    bestResult = { 
+                        formedGroups: formedGroups, 
+                        unassigned: skipped,
+                        unassignedCount: unassignedCount, 
+                        totalOverlap: totalOverlap 
+                    };
                 }
             }
+
+            const formedGroups = bestResult.formedGroups;
+            let currentUnassigned = bestResult.unassigned;
 
             let result = `🔥🏃🏻‍♂️공강전도 팀구성🏃🏻‍♀️🔥\n\n`;
             result += `복 많이 받으세요☺️\n`;
